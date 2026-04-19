@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scryfall to CSV</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; }
+    header { background: #16213e; padding: 1.5rem 2rem; border-bottom: 2px solid #0f3460; }
+    header h1 { font-size: 1.5rem; color: #e94560; letter-spacing: 0.05em; }
+    header p { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
+    main { padding: 2rem; }
+
+    .search-bar { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; }
+    .search-bar input {
+      flex: 1; padding: 0.65rem 1rem; border-radius: 6px;
+      border: 1px solid #0f3460; background: #16213e; color: #e0e0e0;
+      font-size: 1rem;
+    }
+    .search-bar input:focus { outline: none; border-color: #e94560; }
+    button {
+      padding: 0.65rem 1.25rem; border-radius: 6px; border: none;
+      cursor: pointer; font-size: 0.9rem; font-weight: 600;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-search { background: #e94560; color: #fff; }
+    #btn-csv { background: #0f3460; color: #e0e0e0; }
+
+    .status { font-size: 0.85rem; color: #888; margin-bottom: 1rem; min-height: 1.2em; }
+    .status.error { color: #e94560; }
+
+    .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #0f3460; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    thead { background: #0f3460; position: sticky; top: 0; }
+    th { padding: 0.6rem 0.75rem; text-align: left; white-space: nowrap; color: #aac; font-weight: 600; cursor: pointer; user-select: none; }
+    th:hover { color: #fff; }
+    th.sort-asc::after { content: ' ▲'; font-size: 0.7em; }
+    th.sort-desc::after { content: ' ▼'; font-size: 0.7em; }
+    td { padding: 0.5rem 0.75rem; border-top: 1px solid #1e2a4a; vertical-align: top; }
+    tr:hover td { background: #1e2a4a; }
+    .empty { text-align: center; padding: 3rem; color: #555; font-size: 1rem; }
+
+    /* Modal */
+    .overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.6); z-index: 100;
+      align-items: center; justify-content: center;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      background: #16213e; border: 1px solid #0f3460; border-radius: 10px;
+      padding: 1.5rem; width: 380px; max-width: 95vw;
+    }
+    .modal h2 { font-size: 1rem; color: #e0e0e0; margin-bottom: 1rem; }
+    .modal-actions { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    .modal-actions button { font-size: 0.8rem; padding: 0.35rem 0.75rem; background: #0f3460; color: #aac; }
+    .field-list {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 0.4rem 1rem; margin-bottom: 1.25rem;
+    }
+    .field-list label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; cursor: pointer; }
+    .field-list input[type=checkbox] { accent-color: #e94560; width: 14px; height: 14px; cursor: pointer; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 0.6rem; }
+    .modal-footer button { padding: 0.55rem 1.1rem; }
+    #btn-modal-cancel { background: #1a1a2e; color: #888; border: 1px solid #0f3460; }
+    #btn-modal-download { background: #e94560; color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Scryfall to CSV</h1>
+    <p>Search Magic cards using Scryfall syntax, then export to CSV.</p>
+  </header>
+  <main>
+    <div class="search-bar">
+      <input id="query" type="text" placeholder='e.g. c:red t:creature cmc=3' autofocus>
+      <button id="btn-search">Search</button>
+      <button id="btn-csv" disabled>Download CSV</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="table-wrap">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"><tr><td class="empty" colspan="99">Run a search to see results.</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- CSV field picker modal -->
+  <div class="overlay" id="overlay">
+    <div class="modal">
+      <h2>Choose fields to export</h2>
+      <div class="modal-actions">
+        <button id="btn-select-all">Select all</button>
+        <button id="btn-remove-all">Remove all</button>
+      </div>
+      <div class="field-list" id="field-list"></div>
+      <div class="modal-footer">
+        <button id="btn-modal-cancel">Cancel</button>
+        <button id="btn-modal-download">Download</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const FIELDS = [
+      "name","mana_cost","cmc","type_line","oracle_text",
+      "power","toughness","loyalty","colors","color_identity",
+      "set","set_name","rarity","collector_number",
+      "prices.usd","prices.usd_foil",
+    ];
+
+    const EXPORT_FIELDS = [...FIELDS, "scryfall_uri"];
+
+    const LABELS = {
+      scryfall_uri: "URL",
+      mana_cost: "Mana Cost", cmc: "CMC", type_line: "Type",
+      oracle_text: "Oracle Text", color_identity: "Color Identity",
+      set: "Set Code", set_name: "Set Name", collector_number: "Collector #",
+      "prices.usd": "Price (USD)", "prices.usd_foil": "Price (Foil)",
+    };
+
+    function label(f) { return LABELS[f] || f.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); }
+
+    function extractField(card, field) {
+      const parts = field.split('.');
+      let val = card;
+      for (const p of parts) val = val?.[p];
+      if (Array.isArray(val)) return val.join(', ');
+      return val != null ? String(val) : '';
+    }
+
+    function toCSV(cards, fields) {
+      const escape = v => `"${v.replace(/"/g,'""')}"`;
+      const rows = [fields.map(label)];
+      for (const card of cards) rows.push(fields.map(f => escape(extractField(card, f))));
+      return rows.map(r => r.join(',')).join('\r\n');
+    }
+
+    let allCards = [];
+    let sortField = null, sortDir = 1;
+
+    const queryEl = document.getElementById('query');
+    const statusEl = document.getElementById('status');
+    const theadEl = document.getElementById('thead');
+    const tbodyEl = document.getElementById('tbody');
+    const btnSearch = document.getElementById('btn-search');
+    const btnCsv = document.getElementById('btn-csv');
+    const overlay = document.getElementById('overlay');
+    const fieldList = document.getElementById('field-list');
+
+    // Build checkbox list (default: only name checked)
+    EXPORT_FIELDS.forEach(f => {
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f;
+      cb.checked = f === 'name';
+      cb.id = `cb-${f}`;
+      lbl.appendChild(cb);
+      lbl.append(label(f));
+      fieldList.appendChild(lbl);
+    });
+
+    document.getElementById('btn-select-all').addEventListener('click', () =>
+      fieldList.querySelectorAll('input').forEach(cb => cb.checked = true));
+    document.getElementById('btn-remove-all').addEventListener('click', () =>
+      fieldList.querySelectorAll('input').forEach(cb => cb.checked = false));
+
+    document.getElementById('btn-modal-cancel').addEventListener('click', () =>
+      overlay.classList.remove('open'));
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
+
+    document.getElementById('btn-modal-download').addEventListener('click', () => {
+      const selected = EXPORT_FIELDS.filter(f => document.getElementById(`cb-${f}`).checked);
+      if (!selected.length || !allCards.length) return;
+      const blob = new Blob([toCSV(allCards, selected)], { type: 'text/csv' });
+      const a = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob),
+        download: `scryfall-${queryEl.value.trim().slice(0,40).replace(/\s+/g,'_')}.csv`,
+      });
+      a.click();
+      URL.revokeObjectURL(a.href);
+      overlay.classList.remove('open');
+    });
+
+    function renderRows() {
+      const sorted = [...allCards].sort((a, b) => {
+        if (!sortField) return 0;
+        const av = extractField(a, sortField);
+        const bv = extractField(b, sortField);
+        const an = parseFloat(av), bn = parseFloat(bv);
+        if (!isNaN(an) && !isNaN(bn)) return (an - bn) * sortDir;
+        return av.localeCompare(bv) * sortDir;
+      });
+      const frag = document.createDocumentFragment();
+      sorted.forEach(card => {
+        const tr = document.createElement('tr');
+        FIELDS.forEach(f => {
+          const td = document.createElement('td');
+          if (f === 'name' && card.scryfall_uri) {
+            const a = document.createElement('a');
+            a.href = card.scryfall_uri;
+            a.target = '_blank';
+            a.rel = 'noreferrer';
+            a.textContent = extractField(card, f);
+            a.style.cssText = 'color:#e94560;text-decoration:none;';
+            a.onmouseover = () => a.style.textDecoration = 'underline';
+            a.onmouseout = () => a.style.textDecoration = 'none';
+            td.appendChild(a);
+          } else {
+            td.textContent = extractField(card, f);
+          }
+          tr.appendChild(td);
+        });
+        frag.appendChild(tr);
+      });
+      tbodyEl.innerHTML = '';
+      tbodyEl.appendChild(frag);
+    }
+
+    async function doSearch() {
+      const q = queryEl.value.trim();
+      if (!q) return;
+      allCards = [];
+      sortField = null; sortDir = 1;
+      btnSearch.disabled = true;
+      btnCsv.disabled = true;
+      statusEl.className = 'status';
+      statusEl.textContent = 'Searching…';
+      theadEl.innerHTML = '';
+      tbodyEl.innerHTML = '';
+
+      try {
+        let url = 'https://api.scryfall.com/cards/search';
+        let params = new URLSearchParams({ q, order: 'name' });
+        while (url) {
+          const resp = await fetch(url + (params ? '?' + params : ''));
+          params = null;
+          if (resp.status === 404) break;
+          if (!resp.ok) throw new Error((await resp.json()).details || 'Search failed');
+          const data = await resp.json();
+          allCards.push(...data.data);
+          statusEl.textContent = `Loading… ${allCards.length} cards`;
+          url = data.next_page ?? null;
+        }
+
+        statusEl.textContent = `${allCards.length} card${allCards.length !== 1 ? 's' : ''} found.`;
+
+        const hr = document.createElement('tr');
+        FIELDS.forEach(f => {
+          const th = document.createElement('th');
+          th.textContent = label(f);
+          th.addEventListener('click', () => {
+            if (sortField === f) sortDir *= -1; else { sortField = f; sortDir = 1; }
+            document.querySelectorAll('thead th').forEach(el => el.classList.remove('sort-asc','sort-desc'));
+            th.classList.add(sortDir === 1 ? 'sort-asc' : 'sort-desc');
+            renderRows();
+          });
+          hr.appendChild(th);
+        });
+        theadEl.appendChild(hr);
+
+        if (allCards.length === 0) {
+          tbodyEl.innerHTML = '<tr><td class="empty" colspan="99">No results.</td></tr>';
+        } else {
+          renderRows();
+          btnCsv.disabled = false;
+        }
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = e.message;
+        tbodyEl.innerHTML = '<tr><td class="empty" colspan="99">Search failed.</td></tr>';
+      } finally {
+        btnSearch.disabled = false;
+      }
+    }
+
+    btnSearch.addEventListener('click', doSearch);
+    queryEl.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    btnCsv.addEventListener('click', () => { if (allCards.length) overlay.classList.add('open'); });
+  </script>
+</body>
+</html>
